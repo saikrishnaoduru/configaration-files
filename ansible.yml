@@ -1,0 +1,172 @@
+jenkins.yaml
+------------
+
+---
+- hosts: target
+  become: yes
+  remote_user: ec2-user
+  become_user: root
+  tasks:
+  - name: Download Long Term Jenkins release
+    get_url:
+      url: https://pkg.jenkins.io/redhat/jenkins.repo
+      dest: /etc/yum.repos.d/jenkins.repo 
+
+  - name: Import jenkins key from url
+    ansible.builtin.rpm_key:
+      state: present
+      key: https://jenkins-ci.org/redhat/jenkins-ci.org.key
+
+  - name: yum update
+    yum:
+      name: '*'
+      state: latest
+
+  - name: Install java
+    yum:
+      name: java-11-openjdk
+      state: present
+
+  - name: Install jenkins
+    yum:
+      name: jenkins
+      state: latest
+
+  - name: daemon-reload to pick up config changes
+    ansible.builtin.systemd:
+      daemon_reload: yes
+
+  - name: Start jenkins
+    ansible.builtin.systemd:
+      name: jenkins
+      state: started  
+-------------------------------------------------------------------------------------------------
+
+kube-dependencies.yml:-
+---------------------
+---
+- hosts: Kubernetes_Servers
+  become: yes
+  tasks:
+  - name: Docker Installation 
+    apt:
+      name: docker.io
+      state: present
+      update_cache: true
+      
+  - name: install APT Transport HTTPS
+    apt:
+      name: apt-transport-https
+      state: present
+      
+  - name: add Kubernetes apt-key for APT repository
+    apt_key:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      state: present
+     
+  - name: add Kubernetes APT repository
+    apt_repository:
+      repo: deb http://apt.kubernetes.io/ kubernetes-xenial main
+      state: present
+      filename: 'kubernetes'
+      
+  - name: install kubelet
+    apt:
+      name: kubelet=1.20.15-00
+      state: present
+      update_cache: true
+      
+  - name: install kubeadm
+    apt:
+      name: kubelet=1.20.15-00
+      state: present
+      update_cache: true
+      
+- hosts: Kubernetes_Master
+  become: yes
+  tasks:
+  - name: install kubectl
+    apt:
+      name: kubectl=1.20.15-00
+      state: present
+      force: yes
+     
+----------------------------------------------------------
+
+master-cluster.yml :-
+-------------------
+---
+- hosts: Kubernetes_Master
+  become: yes
+  tasks:
+   - name: Start the cluster
+     shell: kubeadm init --pod-network-cidr=10.244.0.0/16 >> cluster.txt
+     args:
+       chdir: $HOME
+       creates: cluster.txt
+       
+   - name: create .kube directory
+     become: yes
+     become_user: linux
+     file:
+       path: $HOME/.kube
+       state: directory
+       mode: 0755
+       
+   - name: copy admin.config to user's kube config
+     copy:
+       src: /etc/kubernetes/admin.config
+       dest: /home/linux/.kube/config
+       remote_src: yes
+       owner: linux
+       
+   - name: install Pod network
+     become: yes
+     become_user: linux 
+     shell: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+     args:
+       chdir: $HOME
+       creates: pod_setup.txt
+
+--------------------------------------------------------------------
+
+workers-cluster.yml:-
+-------------------
+---
+- hosts: Kubernetes_Master
+  become: yes
+  gather_facts: false
+  tasks:
+   - name: get join command
+     shell: kubeadm token create --print-join-command
+     register: join_command_raw
+     
+   - name: Register dummy host with variable It Access In Next Play
+     add_host:
+      name: "DUMMY_HOST"
+      JOIN_COMMAND: " {{ join_command_raw.stdout }}"
+ 
+- hosts: Kubernetes_Worker
+  become: yes
+  tasks:
+   - name: join cluster
+     shell: "{{ hostvars["DUMMY_HOST']['JOIN_COMMAND'] }} >> node_joined.txt"
+     args:
+       chdir: $HOME
+       creates: node_joined.txt
+       
+----------------------------------------------------------------------------------------
+
+site.yml:-
+--------
+
+- name: Install Kubernetes Dependencies
+  import_playbook: kube-dependencies.yml
+- name: Initialaize Kubernetes Master
+  import_playbook: master-cluster.yml
+- name: Get token from master and join workers
+  import_playbook: workers-cluster.yml
+  
+--------------------------------------------------------------------
+
+
